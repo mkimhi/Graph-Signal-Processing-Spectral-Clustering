@@ -46,10 +46,9 @@ def numpy_to_pyvista(v, f=None):
 
 
 class Mesh:
-    def __init__(self, file_path,is_meshio=False):
-        if is_meshio:
-            off = meshio.read(file_path)
-            self.v, self.f = off.points, off.cells_dict['triangle']
+    def __init__(self,file_path="",v=None,f=None):
+        if v is not None and f is not None:
+            self.v, self.f = v,f
         else:
             (self.v, self.f) = read_off(file_path)
         self.v = np.array(self.v)
@@ -72,7 +71,7 @@ class Mesh:
 
     def vertex_vertex_adjacency(self):
         """
-        return |V|x|V| boolean simetric matrix
+        return |V|x|V| boolean symmetric matrix
         where vertexes on the same face show as True
         """
         # the work with .astype is to be able to do matrix multiplications

@@ -4,10 +4,9 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from scipy import sparse
 from scipy.sparse import linalg
-#import Networkx_Graphs
-import networkx as nx
 from code_utils.Mesh import *
-import meshio
+from scipy.spatial.distance import cdist
+from sklearn.preprocessing import normalize
 
 def conv_op_matrix(h,w,f_num=-0.2):
     """
@@ -90,7 +89,7 @@ def create_Degree_matrix(h,w):
     D_g[0, 0] = D_g[0, w - 1] = D_g[h - 1, 0] = D_g[h - 1, w - 1] = 3
     return  D_g
 
-def conjugate_gradient(im_path,L_method ='conv_op',gamma = 0.1,sigma=0.1):
+def conjugate_gradient(im_path,L_method ='both',gamma = 0.1,sigma=0.001):
     """
 
     :param im_path:
@@ -107,16 +106,16 @@ def conjugate_gradient(im_path,L_method ='conv_op',gamma = 0.1,sigma=0.1):
     gray_scale = Image.open(im_path).convert('LA')
     z = np.array(gray_scale)[:,:,0]
     #plot orig image
-    ax = fig.add_subplot('131')
+    ax = fig.add_subplot('221')
     ax.imshow(z, cmap='gray')
 
     h,w = z.shape
     z_cs=z.T.flatten() #column stack
-    noise = np.random.normal(scale=2.55,size=z_cs.shape[0])
+    noise = np.random.normal(scale=4.55,size=z_cs.shape[0])
     y_cs=z_cs+noise
     y= np.reshape(y_cs, (w, h)).T
     #plot noisy image
-    ax = fig.add_subplot('132')
+    ax = fig.add_subplot('222')
     ax.imshow(y,cmap='gray')
     if L_method =='conv op mat':
         L=conv_op_matrix(w,h)
@@ -125,28 +124,113 @@ def conjugate_gradient(im_path,L_method ='conv_op',gamma = 0.1,sigma=0.1):
         W_g = create_Walk_matrix(y_cs,h,sigma)
         L = D_g - W_g
     else:
-        print("method not implemented, L_method can be 'conv op mat' or 'graph laplacian ")
+        L1 = conv_op_matrix(w, h)
+        D_g= create_Degree_matrix(h,w)
+        W_g = create_Walk_matrix(y_cs,h,sigma)
+        L2 = D_g - W_g
+
+        x_rec = linalg.cg((sparse.eye(L1.shape[0]) + gamma * L1), y_cs)[0]
+        ax = fig.add_subplot('223')
+        ax.imshow(np.reshape(x_rec, (w, h)).T, cmap='gray')
+        x_rec = linalg.cg((sparse.eye(L2.shape[0]) + gamma * L2), y_cs)[0]
+        ax = fig.add_subplot('224')
+        ax.imshow(np.reshape(x_rec, (w, h)).T, cmap='gray')
+
+        plt.show()
+        return
     x_rec = linalg.cg((sparse.eye(L.shape[0])+gamma*L),y_cs)[0]
-
     #plot reconstract image
-    ax = fig.add_subplot('133')
+    ax = fig.add_subplot('223')
     ax.imshow(np.reshape(x_rec, (w, h)).T, cmap='gray')
-
     plt.show()
 
-def denosie_3d(off_path):
-    mesh = Mesh(off_path,is_meshio=True)
-    #mesh=Mesh(off_path)
+def constract_W_Pointcloud(mesh,sigma=0.1,r=1):
+    distanses = cdist(mesh.v,mesh.v)
+    valid_dist = (distanses <= r).astype('float')
+    W = sparse.lil_matrix(valid_dist)
+    r,c = W.nonzero()
+    weights = np.exp(-1*(distanses[r,c]**2) / (2*sigma**2))
+    #weights = np.exp(-(1/(2*sigma**2)*distanses[r,c]**2))
+    W[r,c] =weights
+    return W
 
-    mesh.render_pointcloud(snap_name = 'Toilet pointcloud')
+def constract_D_Pointcloud(mesh):
+    D = sparse.lil_matrix((mesh.v.shape[0],mesh.v.shape[0]))
+    for i,degree in enumerate(np.array(mesh.vertex_degree())):
+        D[i,i] = degree
+    return D
 
-    
+def EVD(A,normed=False):
+    """
+    calculate the g Laplacian matrix eigen values and right eigen vectors
+    :param A: matrix
+     :param normed: True if normelized
+    :return:sorted lists of eigenvalues and eigenvectors
+    """
+    if normed:
+        w,v = np.linalg.eigh(normalize(A.A))
+    else:
+        w,v = np.linalg.eigh(A.A)
+    #ids sorted from lowest
+    idx = w.argsort()
+    eigenValues = w[idx]
+    eigenVectors = v[:, idx]
+    return eigenValues,eigenVectors
+
+def LPF(evals,taos= [3, 5, 10],plot = True):
+    biggest_eval = evals[-1]
+    low_pas = lambda t, x: np.exp(-t * x / biggest_eval)
+    if plot:
+        fig, ax = plt.subplots()
+    lp=[]
+    for tao in taos:
+        lp.append(low_pas(tao, evals))
+        if plot:
+            ax.plot(low_pas(tao, evals), evals)
+    if plot:
+        plt.legend(taos)
+        ax.set(xlabel='eigen values', ylabel='H^',
+               title='Low pass filters')
+        fig.savefig("LPF.png")
+        plt.show()
+    return lp
+
+def denosie_3d(off_path,s=1,sigma=4,r=25):
+    mesh = Mesh(off_path)
+    mesh.render_pointcloud(snap_name = 'chair pointcloud')
+    noise = np.random.normal(scale=0.01*s, size=mesh.v.shape)
+    noisy_mesh = Mesh(v=mesh.v+noise,f=mesh.f)
+    size = noisy_mesh.v.shape[0]
+    W = constract_W_Pointcloud(noisy_mesh,sigma=sigma,r=r)
+    #D = constract_D_Pointcloud(noisy_mesh)
+    D= np.sum(W.A, axis=1) ** (-.5)
+    D = np.diag(D)
+    N = sparse.eye(size) - D @ W @ D
+    evals,evecs = EVD(N,normed=True)
+    ev_num= [0,1,3,9]
+    print(f"eigen values: {evals}")
+    np.savetxt('eigen_valus',evals)
+
+    #color the pointcloud with coresponding eigen vectors:
+    for i in ev_num:
+        noisy_mesh.render_pointcloud(scalar_function= evecs[:,i], point_size=10 ,snap_name='Noisy Chair pointcloud colored by '+str(i)+' eigen vector')
+
+    #now let's plot low pass filters
+    taos = [3, 5, 10]
+    lpf = LPF(evals,taos= taos, plot = False)
+    psi = evecs
+    for i in range(len(lpf)):
+        A_h = np.diag(lpf[i])
+        rec = psi @ A_h @ psi.T @ noisy_mesh.v
+        rec_mesh = Mesh(v=rec, f=mesh.f)
+        rec_mesh.render_pointcloud( point_size=10 ,snap_name='reconstruct Chair pointcloud by lpf with tao='+str(taos[i]))
+
 
 
 
 def Denoising():
-    im_path = os.path.join('data','al.jpg')
-    #conjugate_gradient(im_path,L_method ='conv op mat')
-    #conjugate_gradient(im_path,L_method ='graph laplacian')
-    off_path = os.path.join('data','toilet_0010.off')
+    #im_path = os.path.join('data', 'al.jpg')
+    #conjugate_gradient(im_path,L_method ='both')
+
+    off_path = os.path.join('data', 'chair_0015.off')
     denosie_3d(off_path)
